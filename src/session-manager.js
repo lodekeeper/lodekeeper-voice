@@ -24,7 +24,7 @@ export class VoiceSession {
     this.guildId = guildId;
     this.connection = connection;
     this.discordClient = discordClient;
-    this.audioPlayer = new VoiceAudioPlayer();
+    this.audioPlayer = new VoicePlayer();
     this.receivers = new Map(); // userId → UserAudioReceiver
     this.state = 'idle';
     this.lastActivity = Date.now();
@@ -32,7 +32,7 @@ export class VoiceSession {
     this.processingQueue = []; // queue turns during processing/speaking
 
     // Subscribe the audio player to the connection
-    connection.subscribe(this.audioPlayer.rawPlayer);
+    connection.subscribe(this.audioPlayer.getPlayer());
 
     // Set up speaking listeners
     this._setupSpeakingListeners();
@@ -62,16 +62,15 @@ export class VoiceSession {
         userReceiver.on('turn-complete', (turnData) => {
           this._handleTurnComplete(turnData);
         });
+
+        // Subscribe to audio stream ONCE per user (not on every speaking start)
+        const audioStream = receiver.subscribe(userId, { end: { behavior: 'manual' } });
+        audioStream.on('data', (chunk) => {
+          userReceiver.processPacket(chunk);
+        });
+
+        logger.info(MOD, `Subscribed to audio for user ${userId}`);
       }
-
-      // Subscribe to this user's audio stream
-      const audioStream = receiver.subscribe(userId, { end: { behavior: 'manual' } });
-      const userReceiver = this.receivers.get(userId);
-
-      // Pipe Opus packets to receiver
-      audioStream.on('data', (chunk) => {
-        userReceiver.processPacket(chunk);
-      });
     });
 
     receiver.speaking.on('end', (userId) => {
@@ -140,22 +139,7 @@ export class VoiceSession {
 
       // 4. Play audio
       this.state = 'speaking';
-      this.audioPlayer.play(audioBuffer);
-
-      // Wait for playback to finish
-      await new Promise((resolve) => {
-        const checkInterval = setInterval(() => {
-          if (!this.audioPlayer.isPlaying) {
-            clearInterval(checkInterval);
-            resolve();
-          }
-        }, 100);
-        // Safety timeout: 30s max playback
-        setTimeout(() => {
-          clearInterval(checkInterval);
-          resolve();
-        }, 30_000);
-      });
+      await this.audioPlayer.play(audioBuffer);
 
       this.state = 'idle';
       this._processNextQueued();

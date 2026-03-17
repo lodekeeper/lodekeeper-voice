@@ -49,7 +49,7 @@ export class VoicePlayer {
       try {
         const stream = Readable.from(mp3Buffer);
         const resource = createAudioResource(stream, {
-          inputType: StreamType.Arbitrary,
+          inputType: StreamType.OggOpus,
         });
 
         const onIdle = (oldState, newState) => {

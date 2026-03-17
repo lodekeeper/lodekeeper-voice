@@ -48,6 +48,35 @@ async function registerCommands() {
 client.once('ready', async () => {
   logger.info(MOD, `Logged in as ${client.user.tag} (${client.user.id})`);
   await registerCommands();
+  logger.info(MOD, 'Voice bridge ready');
+
+  // Auto-join for testing
+  const autoJoinId = process.env.AUTO_JOIN_CHANNEL;
+  if (autoJoinId) {
+    setTimeout(async () => {
+      try {
+        const channel = await client.channels.fetch(autoJoinId);
+        if (!channel || !channel.isVoiceBased()) {
+          logger.error(MOD, 'Auto-join channel not found or not voice');
+          return;
+        }
+        const guildId = channel.guild.id;
+        const connection = joinVoiceChannel({
+          channelId: channel.id,
+          guildId,
+          adapterCreator: channel.guild.voiceAdapterCreator,
+          selfDeaf: false,
+          selfMute: false,
+        });
+        await entersState(connection, VoiceConnectionStatus.Ready, 15_000);
+        const session = new VoiceSession(channel.id, guildId, connection, client);
+        sessions.set(guildId, session);
+        logger.info(MOD, `Auto-joined voice channel: ${channel.name} (${channel.id})`);
+      } catch (err) {
+        logger.error(MOD, `Auto-join failed: ${err.message}`);
+      }
+    }, 2000);
+  }
 });
 
 client.on('interactionCreate', async (interaction) => {

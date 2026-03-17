@@ -14,16 +14,19 @@ const OPUS_FRAME_SIZE = 960; // 20ms at 48kHz
 // Target for STT: 16kHz mono
 const TARGET_RATE = 16000;
 
+// Max turn length (seconds) — prevent runaway buffers
+const MAX_TURN_SECONDS = 30;
+
+// Minimum turn length (seconds) — skip very short noise bursts
+const MIN_TURN_SECONDS = 0.5;
+
 const encoder = new OpusEncoder(OPUS_RATE, OPUS_CHANNELS);
 
 /**
  * Manages audio reception for a single user.
- * Decodes Opus → PCM, downsamples, runs VAD, emits 'turn-complete' with the buffered audio.
+ * Decodes Opus → PCM, downsamples, runs VAD, emits 'turn-complete'.
  */
 export class UserAudioReceiver extends EventEmitter {
-  /**
-   * @param {string} userId - Discord user ID
-   */
   constructor(userId) {
     super();
     this.userId = userId;
@@ -31,18 +34,18 @@ export class UserAudioReceiver extends EventEmitter {
     this.isSpeaking = false;
     this.silenceStart = null;
     this.totalSamples = 0;
+    this.subscribed = false; // track if we already have a stream subscription
   }
 
   /**
    * Feed an Opus packet from the Discord receive stream.
-   * @param {Buffer} opusPacket
    */
   processPacket(opusPacket) {
     let pcm;
     try {
       pcm = encoder.decode(opusPacket);
     } catch (err) {
-      logger.debug(MOD, `Opus decode error for ${this.userId}`, err.message);
+      logger.debug(MOD, `Opus decode error for ${this.userId}: ${err.message}`);
       return;
     }
 
@@ -63,24 +66,29 @@ export class UserAudioReceiver extends EventEmitter {
       }
       this.silenceStart = null;
       this.pcmChunks.push(mono16k);
-      this.totalSamples += mono16k.length / 2; // 16-bit = 2 bytes per sample
+      this.totalSamples += mono16k.length / 2;
+
+      // Hard cap: force-finish if too long
+      const currentDuration = this.totalSamples / TARGET_RATE;
+      if (currentDuration >= MAX_TURN_SECONDS) {
+        logger.info(MOD, `Max turn length (${MAX_TURN_SECONDS}s) hit for ${this.userId}, forcing finish`);
+        this.finishTurn();
+      }
     } else if (this.isSpeaking) {
-      // Silence during speech — buffer it (might be a pause)
+      // Silence during speech — buffer it
       this.pcmChunks.push(mono16k);
       this.totalSamples += mono16k.length / 2;
 
       if (!this.silenceStart) {
         this.silenceStart = Date.now();
       } else if (Date.now() - this.silenceStart >= config.voice.silenceDurationMs) {
-        // Turn complete
         this.finishTurn();
       }
     }
-    // If not speaking and below threshold, discard (silence before speech)
   }
 
   /**
-   * Handle the Discord speaking-end event (user stopped transmitting).
+   * Handle the Discord speaking-end event.
    */
   onSpeakingEnd() {
     if (this.isSpeaking && this.pcmChunks.length > 0) {
@@ -89,13 +97,26 @@ export class UserAudioReceiver extends EventEmitter {
   }
 
   /**
-   * Flush any buffered audio as a complete turn.
+   * Flush buffered audio as a complete turn.
    */
   finishTurn() {
     if (this.pcmChunks.length === 0) return;
 
     const fullBuffer = Buffer.concat(this.pcmChunks);
     const durationSec = this.totalSamples / TARGET_RATE;
+
+    // Reset state immediately
+    this.pcmChunks = [];
+    this.totalSamples = 0;
+    this.isSpeaking = false;
+    this.silenceStart = null;
+
+    // Skip turns that are too short (noise bursts, clicks)
+    if (durationSec < MIN_TURN_SECONDS) {
+      logger.debug(MOD, `Skipping short turn (${durationSec.toFixed(1)}s) from ${this.userId}`);
+      return;
+    }
+
     logger.info(MOD, `Turn complete: user ${this.userId}, ${durationSec.toFixed(1)}s, ${fullBuffer.length} bytes`);
 
     this.emit('turn-complete', {
@@ -103,16 +124,8 @@ export class UserAudioReceiver extends EventEmitter {
       pcmBuffer: fullBuffer,
       durationSec,
     });
-
-    this.pcmChunks = [];
-    this.totalSamples = 0;
-    this.isSpeaking = false;
-    this.silenceStart = null;
   }
 
-  /**
-   * Clean up resources.
-   */
   destroy() {
     this.pcmChunks = [];
     this.removeAllListeners();
@@ -121,11 +134,9 @@ export class UserAudioReceiver extends EventEmitter {
 
 /**
  * Downsample stereo PCM at sourceRate to mono PCM at targetRate.
- * Simple linear interpolation + channel averaging.
- * Input: 16-bit LE signed PCM
  */
 function downsample(pcmBuffer, sourceRate, sourceChannels, targetRate) {
-  const bytesPerSample = 2; // 16-bit
+  const bytesPerSample = 2;
   const sourceFrameSize = sourceChannels * bytesPerSample;
   const numSourceFrames = pcmBuffer.length / sourceFrameSize;
   const ratio = sourceRate / targetRate;
@@ -135,7 +146,6 @@ function downsample(pcmBuffer, sourceRate, sourceChannels, targetRate) {
 
   for (let i = 0; i < numTargetFrames; i++) {
     const srcIdx = Math.floor(i * ratio);
-    // Average channels to mono
     let sum = 0;
     for (let ch = 0; ch < sourceChannels; ch++) {
       sum += pcmBuffer.readInt16LE((srcIdx * sourceChannels + ch) * bytesPerSample);
