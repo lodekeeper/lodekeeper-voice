@@ -1,0 +1,27 @@
+{
+  "name": "lodekeeper-voice",
+  "version": "0.1.0",
+  "description": "Discord voice bridge for Lodekeeper — standalone STT→LLM→TTS pipeline",
+  "main": "src/voice-bridge.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/voice-bridge.js",
+    "dev": "node --watch src/voice-bridge.js"
+  },
+  "author": "Lodekeeper",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.79.0",
+    "@deepgram/sdk": "^5.0.0",
+    "@discordjs/opus": "^0.10.0",
+    "@discordjs/voice": "^0.19.1",
+    "discord.js": "^14.25.1",
+    "dotenv": "^17.3.1",
+    "ffmpeg-static": "^5.3.0",
+    "libsodium-wrappers": "^0.8.2",
+    "openai": "^6.31.0"
+  }
+}
